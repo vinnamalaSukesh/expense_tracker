@@ -25,7 +25,8 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/rupee.png",
         "backgroundColor": "#ffffff"
-      }
+      },
+      "package": "com.sukeshv19.expensetracker"
     },
     "extra": {
       "eas": {
