@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "Expense Tracker",
+    "slug": "expense-tracker",
+    "version": "1.0.0",
+    "experiments": {
+      "tsconfigPaths": true
+    },
+    "plugins": [],
+    "orientation": "portrait",
+    "icon": "./assets/rupee.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/rupee.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/rupee.png",
+        "backgroundColor": "#ffffff"
+      }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "281ebbe4-b351-4145-9a7e-e9178b55d74c"
+      }
+    }
+  }
+}
