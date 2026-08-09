@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Expense Tracker",
-    "slug": "expense-tracker",
+    "slug": "daily-activity",
     "version": "1.0.0",
     "experiments": {
       "tsconfigPaths": true
@@ -30,8 +30,9 @@
     },
     "extra": {
       "eas": {
-        "projectId": "281ebbe4-b351-4145-9a7e-e9178b55d74c"
+        "projectId": "57fd9d81-bc76-433b-a93e-40da1896478b"
       }
-    }
+    },
+    "owner": "sukeshv19"
   }
 }
