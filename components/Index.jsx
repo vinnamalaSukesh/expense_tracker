@@ -1,8 +1,12 @@
 import { Entypo, FontAwesome } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useEffect, useState } from 'react';
+import { doc, getDoc, onSnapshot, setDoc } from 'firebase/firestore';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, FlatList, Modal, Platform, ScrollView, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useAuth } from '../lib/AuthContext';
+import { db } from '../lib/firebase';
+import { MARCH_2026_DATA } from '../lib/marchImportData';
 import PieChart from './pie_chart';
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
@@ -30,6 +34,7 @@ function PickerModal({ visible, title, options, selected, onSelect, onClose }) {
 }
 
 function Index() {
+  const { user } = useAuth();
   const [expensesData, setExpensesData] = useState({});
   const monthsData = [];
   const [selectedDate, setSelectedDate] = useState(new Date());
@@ -37,24 +42,36 @@ function Index() {
   const [amount, setAmount] = useState('');
   const [showYearPicker, setShowYearPicker] = useState(false);
   const [showMonthPicker, setShowMonthPicker] = useState(false);
+  const migrationAttempted = useRef(false);
 
   const dataYears = Object.keys(expensesData).map(Number);
   const currentYear = new Date().getFullYear();
   const allYears = Array.from(new Set([...dataYears, currentYear])).sort((a, b) => b - a).map(String);
 
+  // Syncs expenses from Firestore in real time; on first login for this account
+  // (no "expenses" field yet) it migrates any pre-existing local AsyncStorage data up.
   useEffect(() => {
-    const loadData = async () => {
+    if (!user) return;
+    const userDocRef = doc(db, 'users', user.uid);
+    const unsubscribe = onSnapshot(userDocRef, async (snap) => {
+      const remoteExpenses = snap.data()?.expenses;
+      if (remoteExpenses) {
+        setExpensesData(remoteExpenses);
+        return;
+      }
+      if (migrationAttempted.current) return;
+      migrationAttempted.current = true;
       try {
         const savedData = await AsyncStorage.getItem('expenses-data');
-        if (savedData) {
-          setExpensesData(JSON.parse(savedData));
-        }
+        const parsed = savedData ? JSON.parse(savedData) : {};
+        setExpensesData(parsed);
+        await setDoc(userDocRef, { expenses: parsed }, { merge: true });
       } catch (error) {
-        console.error('Failed to load expenses', error);
+        console.error('Failed to load/migrate expenses', error);
       }
-    };
-    loadData();
-  }, []);
+    });
+    return unsubscribe;
+  }, [user]);
 
   const selectedYear = selectedDate.getFullYear().toString();
   const selectedMonth = selectedDate.toLocaleString('default', { month: 'long' });
@@ -113,9 +130,9 @@ function Index() {
     setExpenseName('');
     setAmount('');
 
-    // Save permanently to device storage
+    // Save permanently to the cloud
     try {
-      await AsyncStorage.setItem('expenses-data', JSON.stringify(updatedData));
+      await setDoc(doc(db, 'users', user.uid), { expenses: updatedData }, { merge: true });
     } catch (error) {
       Alert.alert('Storage Error', 'Failed to save expense permanently.');
     }
@@ -141,7 +158,7 @@ function Index() {
     }
     setExpensesData(updatedData);
     try {
-      await AsyncStorage.setItem('expenses-data', JSON.stringify(updatedData));
+      await setDoc(doc(db, 'users', user.uid), { expenses: updatedData }, { merge: true });
     } catch {
       Alert.alert('Storage Error', 'Failed to delete expense.');
     }
@@ -157,7 +174,7 @@ function Index() {
     setExpensesData(updatedData);
     setEditingName(null);
     try {
-      await AsyncStorage.setItem('expenses-data', JSON.stringify(updatedData));
+      await setDoc(doc(db, 'users', user.uid), { expenses: updatedData }, { merge: true });
     } catch {
       Alert.alert('Storage Error', 'Failed to update expense.');
     }
@@ -174,6 +191,34 @@ function Index() {
     d.setMonth(MONTHS.indexOf(month));
     setSelectedDate(d);
   };
+
+  const handleImportMarch2026 = async () => {
+    const updatedData = JSON.parse(JSON.stringify(expensesData));
+    if (!updatedData['2026']) updatedData['2026'] = {};
+    updatedData['2026']['March'] = MARCH_2026_DATA;
+    setExpensesData(updatedData);
+    try {
+      const userDocRef = doc(db, 'users', user.uid);
+      await setDoc(userDocRef, { expenses: { '2026': { March: MARCH_2026_DATA } } }, { merge: true });
+      const verifySnap = await getDoc(userDocRef);
+      const daysWritten = Object.keys(verifySnap.data()?.expenses?.['2026']?.March ?? {}).length;
+      Alert.alert('Synced', `uid: ${user.uid}\nVerified in Firestore: ${daysWritten} days of March 2026 data.`);
+    } catch (error) {
+      Alert.alert('Storage Error', `${error.code ?? ''} ${error.message}`);
+    }
+  };
+
+  const handleCheckCloudData = async () => {
+    try {
+      const snap = await getDoc(doc(db, 'users', user.uid));
+      const marchData = snap.data()?.expenses?.['2026']?.March;
+      const daysFound = marchData ? Object.keys(marchData).length : 0;
+      Alert.alert('Cloud Check', `uid: ${user.uid}\nDoc exists: ${snap.exists()}\nMarch 2026 days found: ${daysFound}`);
+    } catch (error) {
+      Alert.alert('Cloud Check Error', `${error.code ?? ''} ${error.message}`);
+    }
+  };
+
   return (
   <SafeAreaView className="flex-1 bg-white dark:bg-slate-900 pb-5" edges={['bottom']}>
     <ScrollView className="flex-1 p-4">
@@ -184,6 +229,15 @@ function Index() {
         </TouchableOpacity>
         <TouchableOpacity className="border border-indigo-600 rounded-lg py-1.5 px-3 bg-indigo-50" onPress={() => setShowMonthPicker(true)}>
           <Text className="text-indigo-600 font-bold text-[16px]">{selectedMonth} ▾</Text>
+        </TouchableOpacity>
+      </View>
+
+      <View className="flex-row gap-2 mb-5">
+        <TouchableOpacity className="flex-1 bg-amber-500 rounded-lg py-3 px-4" onPress={handleImportMarch2026}>
+          <Text className="text-white text-center font-bold">Sync March 2026 Data</Text>
+        </TouchableOpacity>
+        <TouchableOpacity className="flex-1 bg-slate-500 rounded-lg py-3 px-4" onPress={handleCheckCloudData}>
+          <Text className="text-white text-center font-bold">Check Cloud Data</Text>
         </TouchableOpacity>
       </View>
 
