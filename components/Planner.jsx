@@ -1,13 +1,28 @@
 import { Entypo } from '@expo/vector-icons';
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import { FlatList, ScrollView, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useAuth } from '../lib/AuthContext';
-import { db } from '../lib/firebase';
+import { supabase } from '../lib/supabase';
 
 const WEEKDAY_TASKS = ["exam prep 1 hour", "exam prep 1 hour"];
 const WEEKEND_TASKS = ["exam prep 2.5 hour", "exam prep 2.5 hour"];
+
+const DATA_BUCKET = 'app-data';
+const PLANNER_FILE = 'planner.json';
+
+async function fetchPlannerFile() {
+  const { data } = supabase.storage.from(DATA_BUCKET).getPublicUrl(PLANNER_FILE);
+  const res = await fetch(`${data.publicUrl}?t=${Date.now()}`);
+  if (!res.ok) return {};
+  return res.json();
+}
+
+async function savePlannerFile(planner) {
+  const { error } = await supabase.storage
+    .from(DATA_BUCKET)
+    .upload(PLANNER_FILE, JSON.stringify(planner), { contentType: 'application/json', upsert: true });
+  if (error) throw error;
+}
 
 function dateKey(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -24,19 +39,25 @@ function defaultTasksFor(d) {
 }
 
 export default function Planner() {
-  const { user } = useAuth();
   const [plannerData, setPlannerData] = useState({});
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [newTask, setNewTask] = useState('');
 
   useEffect(() => {
-    if (!user) return;
-    const userDocRef = doc(db, 'users', user.uid);
-    const unsubscribe = onSnapshot(userDocRef, (snap) => {
-      setPlannerData(snap.data()?.planner ?? {});
-    });
-    return unsubscribe;
-  }, [user]);
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const remote = await fetchPlannerFile();
+        if (cancelled) return;
+        setPlannerData(remote);
+      } catch (err) {
+        console.error('Failed to load planner', err);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, []);
 
   const key = dateKey(selectedDate);
   const tasksForDay = plannerData[key] ?? defaultTasksFor(selectedDate);
@@ -44,7 +65,11 @@ export default function Planner() {
   const saveTasks = async (tasks) => {
     const updated = { ...plannerData, [key]: tasks };
     setPlannerData(updated);
-    await setDoc(doc(db, 'users', user.uid), { planner: updated }, { merge: true });
+    try {
+      await savePlannerFile(updated);
+    } catch (err) {
+      console.error('Failed to save planner', err);
+    }
   };
 
   const toggleTask = (id) => {

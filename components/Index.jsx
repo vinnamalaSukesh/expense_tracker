@@ -1,16 +1,55 @@
 import { Entypo, FontAwesome } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { doc, getDoc, onSnapshot, setDoc } from 'firebase/firestore';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, FlatList, Modal, Platform, ScrollView, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useAuth } from '../lib/AuthContext';
-import { db } from '../lib/firebase';
-import { MARCH_2026_DATA } from '../lib/marchImportData';
+import { supabase } from '../lib/supabase';
 import PieChart from './pie_chart';
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const SOURCES = ['SBI UPI', 'Kotak UPI', 'IDFC UPI', 'Axis Credit', 'IDFC Credit'];
+// Starter categories; more can be added on the fly from the type picker.
+const SEED_TYPES = ['Food', 'Fruits', 'Snacks', 'Curd', 'Grocery', 'Travel', 'Education', 'Shopping', 'Entertainment', 'Recharge'];
 
-function PickerModal({ visible, title, options, selected, onSelect, onClose }) {
+const DATA_BUCKET = 'app-data';
+const EXPENSES_FILE = 'expenses.json';
+
+// Expenses were plain numbers before the "source"/"type" columns were added;
+// these helpers keep old entries readable instead of crashing on `.amount`.
+function getAmount(entry) {
+  return typeof entry === 'number' ? entry : entry.amount;
+}
+function getSource(entry) {
+  return typeof entry === 'number' ? null : entry.source;
+}
+function getType(entry) {
+  return typeof entry === 'number' ? null : entry.type ?? null;
+}
+
+async function fetchExpensesFile() {
+  const { data } = supabase.storage.from(DATA_BUCKET).getPublicUrl(EXPENSES_FILE);
+  const res = await fetch(`${data.publicUrl}?t=${Date.now()}`);
+  if (!res.ok) return null; // file doesn't exist yet
+  return res.json();
+}
+
+async function saveExpensesFile(expenses) {
+  const { error } = await supabase.storage
+    .from(DATA_BUCKET)
+    .upload(EXPENSES_FILE, JSON.stringify(expenses), { contentType: 'application/json', upsert: true });
+  if (error) throw error;
+}
+
+function PickerModal({ visible, title, options, selected, onSelect, onClose, allowCustom, onAddCustom }) {
+  const [customText, setCustomText] = useState('');
+
+  const submitCustom = () => {
+    const trimmed = customText.trim();
+    if (!trimmed) return;
+    onAddCustom(trimmed);
+    setCustomText('');
+    onClose();
+  };
+
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <TouchableOpacity className="flex-1 bg-black/40 justify-center items-center" activeOpacity={1} onPress={onClose}>
@@ -27,6 +66,21 @@ function PickerModal({ visible, title, options, selected, onSelect, onClose }) {
               </TouchableOpacity>
             ))}
           </ScrollView>
+          {allowCustom && (
+            <View className="flex-row items-center gap-2 mt-2.5 pt-2.5 border-t border-gray-100 dark:border-slate-700">
+              <TextInput
+                className="flex-1 border border-gray-300 dark:border-slate-600 dark:text-white rounded-lg py-2 px-2.5 text-sm"
+                placeholder="New category"
+                placeholderTextColor="#9ca3af"
+                value={customText}
+                onChangeText={setCustomText}
+                onSubmitEditing={submitCustom}
+              />
+              <TouchableOpacity className="bg-indigo-600 rounded-lg px-3 py-2" onPress={submitCustom}>
+                <Text className="text-white font-bold text-sm">Add</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
       </TouchableOpacity>
     </Modal>
@@ -34,44 +88,70 @@ function PickerModal({ visible, title, options, selected, onSelect, onClose }) {
 }
 
 function Index() {
-  const { user } = useAuth();
   const [expensesData, setExpensesData] = useState({});
   const monthsData = [];
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [expenseName, setExpenseName] = useState('');
   const [amount, setAmount] = useState('');
+  const [source, setSource] = useState(SOURCES[0]);
+  const [type, setType] = useState(SEED_TYPES[0]);
+  const [extraTypes, setExtraTypes] = useState([]);
   const [showYearPicker, setShowYearPicker] = useState(false);
   const [showMonthPicker, setShowMonthPicker] = useState(false);
+  const [showSourcePicker, setShowSourcePicker] = useState(false);
+  const [showTypePicker, setShowTypePicker] = useState(false);
   const migrationAttempted = useRef(false);
+
+  const usedTypes = new Set();
+  for (const months of Object.values(expensesData)) {
+    for (const days of Object.values(months)) {
+      for (const dayExpenses of Object.values(days)) {
+        for (const entry of Object.values(dayExpenses)) {
+          const t = getType(entry);
+          if (t) usedTypes.add(t);
+        }
+      }
+    }
+  }
+  const allTypes = Array.from(new Set([...SEED_TYPES, ...usedTypes, ...extraTypes])).sort();
+
+  const addCustomType = (newType) => {
+    setExtraTypes((prev) => (prev.includes(newType) ? prev : [...prev, newType]));
+    setType(newType);
+  };
 
   const dataYears = Object.keys(expensesData).map(Number);
   const currentYear = new Date().getFullYear();
   const allYears = Array.from(new Set([...dataYears, currentYear])).sort((a, b) => b - a).map(String);
 
-  // Syncs expenses from Firestore in real time; on first login for this account
-  // (no "expenses" field yet) it migrates any pre-existing local AsyncStorage data up.
+  // Loads expenses.json from Supabase Storage; if it doesn't exist yet, it
+  // migrates any pre-existing local AsyncStorage data up.
   useEffect(() => {
-    if (!user) return;
-    const userDocRef = doc(db, 'users', user.uid);
-    const unsubscribe = onSnapshot(userDocRef, async (snap) => {
-      const remoteExpenses = snap.data()?.expenses;
-      if (remoteExpenses) {
-        setExpensesData(remoteExpenses);
-        return;
-      }
-      if (migrationAttempted.current) return;
-      migrationAttempted.current = true;
+    let cancelled = false;
+
+    (async () => {
       try {
+        const remote = await fetchExpensesFile();
+        if (cancelled) return;
+
+        if (remote && Object.keys(remote).length > 0) {
+          setExpensesData(remote);
+          return;
+        }
+
+        if (migrationAttempted.current) return;
+        migrationAttempted.current = true;
         const savedData = await AsyncStorage.getItem('expenses-data');
         const parsed = savedData ? JSON.parse(savedData) : {};
         setExpensesData(parsed);
-        await setDoc(userDocRef, { expenses: parsed }, { merge: true });
-      } catch (error) {
-        console.error('Failed to load/migrate expenses', error);
+        await saveExpensesFile(parsed);
+      } catch (err) {
+        console.error('Failed to load/migrate expenses', err);
       }
-    });
-    return unsubscribe;
-  }, [user]);
+    })();
+
+    return () => { cancelled = true; };
+  }, []);
 
   const selectedYear = selectedDate.getFullYear().toString();
   const selectedMonth = selectedDate.toLocaleString('default', { month: 'long' });
@@ -91,9 +171,9 @@ function Index() {
   for (const [year, months] of Object.entries(expensesData)) {
     for (const [month, days] of Object.entries(months)) {
       let total = 0;
-      for (const [day, expenses] of Object.entries(days)) {
-        for (const [expenseName, amount] of Object.entries(expenses)) {
-          total += amount;
+      for (const [, expenses] of Object.entries(days)) {
+        for (const [, entry] of Object.entries(expenses)) {
+          total += getAmount(entry);
         }
       }
       monthsData.push({
@@ -124,7 +204,7 @@ function Index() {
     if (!updatedData[selectedYear][selectedMonth]) updatedData[selectedYear][selectedMonth] = {};
     if (!updatedData[selectedYear][selectedMonth][selectedDay]) updatedData[selectedYear][selectedMonth][selectedDay] = {};
 
-    updatedData[selectedYear][selectedMonth][selectedDay][expenseName.trim()] = numericAmount;
+    updatedData[selectedYear][selectedMonth][selectedDay][expenseName.trim()] = { amount: numericAmount, source, type };
 
     setExpensesData(updatedData); // Update UI
     setExpenseName('');
@@ -132,22 +212,35 @@ function Index() {
 
     // Save permanently to the cloud
     try {
-      await setDoc(doc(db, 'users', user.uid), { expenses: updatedData }, { merge: true });
-    } catch (error) {
+      await saveExpensesFile(updatedData);
+    } catch {
       Alert.alert('Storage Error', 'Failed to save expense permanently.');
     }
   };
 
   const monthlyExpenseMap = {};
+  const sourceTotals = {};
+  const typeTotals = {};
   let monthTotal = 0;
   const monthData = (expensesData)[selectedYear]?.[selectedMonth] ?? {};
   for (const [, expenses] of Object.entries(monthData)) {
-    for (const [name, amt] of Object.entries(expenses)) {
+    for (const [name, entry] of Object.entries(expenses)) {
+      const amt = getAmount(entry);
+      const entrySource = getSource(entry) ?? 'Unknown';
+      const entryType = getType(entry) ?? 'Unknown';
       monthlyExpenseMap[name] = (monthlyExpenseMap[name] ?? 0) + amt;
+      sourceTotals[entrySource] = (sourceTotals[entrySource] ?? 0) + amt;
+      typeTotals[entryType] = (typeTotals[entryType] ?? 0) + amt;
       monthTotal += amt;
     }
   }
   const pieData = Object.entries(monthlyExpenseMap)
+    .map(([name, amount]) => ({ name, amount }))
+    .sort((a, b) => b.amount - a.amount);
+  const sourceData = Object.entries(sourceTotals)
+    .map(([name, amount]) => ({ name, amount }))
+    .sort((a, b) => b.amount - a.amount);
+  const typeData = Object.entries(typeTotals)
     .map(([name, amount]) => ({ name, amount }))
     .sort((a, b) => b.amount - a.amount);
 
@@ -158,7 +251,7 @@ function Index() {
     }
     setExpensesData(updatedData);
     try {
-      await setDoc(doc(db, 'users', user.uid), { expenses: updatedData }, { merge: true });
+      await saveExpensesFile(updatedData);
     } catch {
       Alert.alert('Storage Error', 'Failed to delete expense.');
     }
@@ -170,11 +263,16 @@ function Index() {
     const numericAmount = parseFloat(editAmount);
     if (isNaN(numericAmount)) return;
     const updatedData = JSON.parse(JSON.stringify(expensesData));
-    updatedData[selectedYear][selectedMonth][selectedDay][oldName] = numericAmount;
+    const existingEntry = updatedData[selectedYear][selectedMonth][selectedDay][oldName];
+    updatedData[selectedYear][selectedMonth][selectedDay][oldName] = {
+      amount: numericAmount,
+      source: getSource(existingEntry),
+      type: getType(existingEntry),
+    };
     setExpensesData(updatedData);
     setEditingName(null);
     try {
-      await setDoc(doc(db, 'users', user.uid), { expenses: updatedData }, { merge: true });
+      await saveExpensesFile(updatedData);
     } catch {
       Alert.alert('Storage Error', 'Failed to update expense.');
     }
@@ -192,33 +290,6 @@ function Index() {
     setSelectedDate(d);
   };
 
-  const handleImportMarch2026 = async () => {
-    const updatedData = JSON.parse(JSON.stringify(expensesData));
-    if (!updatedData['2026']) updatedData['2026'] = {};
-    updatedData['2026']['March'] = MARCH_2026_DATA;
-    setExpensesData(updatedData);
-    try {
-      const userDocRef = doc(db, 'users', user.uid);
-      await setDoc(userDocRef, { expenses: { '2026': { March: MARCH_2026_DATA } } }, { merge: true });
-      const verifySnap = await getDoc(userDocRef);
-      const daysWritten = Object.keys(verifySnap.data()?.expenses?.['2026']?.March ?? {}).length;
-      Alert.alert('Synced', `uid: ${user.uid}\nVerified in Firestore: ${daysWritten} days of March 2026 data.`);
-    } catch (error) {
-      Alert.alert('Storage Error', `${error.code ?? ''} ${error.message}`);
-    }
-  };
-
-  const handleCheckCloudData = async () => {
-    try {
-      const snap = await getDoc(doc(db, 'users', user.uid));
-      const marchData = snap.data()?.expenses?.['2026']?.March;
-      const daysFound = marchData ? Object.keys(marchData).length : 0;
-      Alert.alert('Cloud Check', `uid: ${user.uid}\nDoc exists: ${snap.exists()}\nMarch 2026 days found: ${daysFound}`);
-    } catch (error) {
-      Alert.alert('Cloud Check Error', `${error.code ?? ''} ${error.message}`);
-    }
-  };
-
   return (
   <SafeAreaView className="flex-1 bg-white dark:bg-slate-900 pb-5" edges={['bottom']}>
     <ScrollView className="flex-1 p-4">
@@ -229,15 +300,6 @@ function Index() {
         </TouchableOpacity>
         <TouchableOpacity className="border border-indigo-600 rounded-lg py-1.5 px-3 bg-indigo-50" onPress={() => setShowMonthPicker(true)}>
           <Text className="text-indigo-600 font-bold text-[16px]">{selectedMonth} ▾</Text>
-        </TouchableOpacity>
-      </View>
-
-      <View className="flex-row gap-2 mb-5">
-        <TouchableOpacity className="flex-1 bg-amber-500 rounded-lg py-3 px-4" onPress={handleImportMarch2026}>
-          <Text className="text-white text-center font-bold">Sync March 2026 Data</Text>
-        </TouchableOpacity>
-        <TouchableOpacity className="flex-1 bg-slate-500 rounded-lg py-3 px-4" onPress={handleCheckCloudData}>
-          <Text className="text-white text-center font-bold">Check Cloud Data</Text>
         </TouchableOpacity>
       </View>
 
@@ -261,23 +323,29 @@ function Index() {
         }}
       />
 
-      <View className="flex-row items-center mb-2 justify-between">
+      <View className="flex-row items-center gap-2 mb-2">
         <TextInput
-          className="w-[50%] border border-gray-300 dark:border-slate-600 dark:text-white rounded-lg p-3 text-base"
+          className="flex-1 border border-gray-300 dark:border-slate-600 dark:text-white rounded-lg p-3 text-base"
           placeholder="Expense name"
           placeholderTextColor="#9ca3af"
           value={expenseName}
           onChangeText={setExpenseName}
         />
+        <TouchableOpacity className="border border-indigo-600 rounded-lg px-2 py-3 bg-indigo-50" onPress={() => setShowSourcePicker(true)}>
+          <Text className="text-indigo-600 font-bold text-xs" numberOfLines={1}>{source} ▾</Text>
+        </TouchableOpacity>
+        <TouchableOpacity className="border border-emerald-600 rounded-lg px-2 py-3 bg-emerald-50" onPress={() => setShowTypePicker(true)}>
+          <Text className="text-emerald-600 font-bold text-xs" numberOfLines={1}>{type} ▾</Text>
+        </TouchableOpacity>
         <TextInput
-          className="w-[30%] border border-gray-300 dark:border-slate-600 dark:text-white rounded-lg p-3 text-base"
-          placeholder="₹ Amount"
+          className="w-20 border border-gray-300 dark:border-slate-600 dark:text-white rounded-lg p-3 text-base"
+          placeholder="₹ Amt"
           placeholderTextColor="#9ca3af"
           value={amount}
           onChangeText={setAmount}
           keyboardType="numeric"
         />
-        <TouchableOpacity className="w-[10%] aspect-square bg-indigo-600 rounded-lg justify-center items-center" onPress={handleAddExpense}>
+        <TouchableOpacity className="w-10 h-10 bg-indigo-600 rounded-lg justify-center items-center" onPress={handleAddExpense}>
           <Text className="text-white text-[22px] leading-6">+</Text>
         </TouchableOpacity>
       </View>
@@ -286,9 +354,17 @@ function Index() {
         {todayExpenses.length === 0 ? (
           <Text className="text-gray-600 dark:text-gray-400 text-xl font-bold my-5 text-center">No expenses for this day.</Text>
         ) : (
-          todayExpenses.map(([name, amt]) => (
+          todayExpenses.map(([name, entry]) => {
+            const amt = getAmount(entry);
+            const entrySource = getSource(entry);
+            const entryType = getType(entry);
+            const subtitle = [entryType, entrySource].filter(Boolean).join(' · ');
+            return (
             <View key={name} className="flex-row justify-between items-center mb-5 border-b border-gray-100 dark:border-slate-700">
-              <Text className="w-[50%] text-xl font-bold dark:text-white" numberOfLines={1}>{name}</Text>
+              <View className="w-[50%]">
+                <Text className="text-xl font-bold dark:text-white" numberOfLines={1}>{name}</Text>
+                {subtitle && <Text className="text-xs text-gray-500 dark:text-gray-400" numberOfLines={1}>{subtitle}</Text>}
+              </View>
               {editingName === name ? (
                 <>
                   <TextInput
@@ -328,7 +404,8 @@ function Index() {
                 </>
               )}
             </View>
-          ))
+            );
+          })
         )}
       </View>
 
@@ -345,9 +422,52 @@ function Index() {
       </View>
       
       <PieChart data={pieData} total={monthTotal} />
+
+      <View className="p-5">
+        <Text className="text-2xl font-bold mb-5 dark:text-white">By Source ({selectedMonth})</Text>
+        <View>
+          {sourceData.length === 0 ? (
+            <Text className="text-gray-600 dark:text-gray-400 text-base text-center">No expenses this month.</Text>
+          ) : (
+            sourceData.map((item) => (
+              <View key={item.name} className="flex-row justify-between py-3.5 border-b border-gray-200 dark:border-slate-700">
+                <Text className="text-lg dark:text-gray-200">{item.name}</Text>
+                <Text className="text-lg font-bold dark:text-white">₹{item.amount}</Text>
+              </View>
+            ))
+          )}
+        </View>
+      </View>
+
+      <View className="p-5">
+        <Text className="text-2xl font-bold mb-5 dark:text-white">By Type ({selectedMonth})</Text>
+        <View>
+          {typeData.length === 0 ? (
+            <Text className="text-gray-600 dark:text-gray-400 text-base text-center">No expenses this month.</Text>
+          ) : (
+            typeData.map((item) => (
+              <View key={item.name} className="flex-row justify-between py-3.5 border-b border-gray-200 dark:border-slate-700">
+                <Text className="text-lg dark:text-gray-200">{item.name}</Text>
+                <Text className="text-lg font-bold dark:text-white">₹{item.amount}</Text>
+              </View>
+            ))
+          )}
+        </View>
+      </View>
     </ScrollView>
     <PickerModal visible={showYearPicker} title="Select Year" options={allYears} selected={selectedYear} onSelect={changeYear} onClose={() => setShowYearPicker(false)} />
     <PickerModal visible={showMonthPicker} title="Select Month" options={MONTHS} selected={selectedMonth} onSelect={changeMonth} onClose={() => setShowMonthPicker(false)} />
+    <PickerModal visible={showSourcePicker} title="Select Source" options={SOURCES} selected={source} onSelect={setSource} onClose={() => setShowSourcePicker(false)} />
+    <PickerModal
+      visible={showTypePicker}
+      title="Select Type"
+      options={allTypes}
+      selected={type}
+      onSelect={setType}
+      onClose={() => setShowTypePicker(false)}
+      allowCustom
+      onAddCustom={addCustomType}
+    />
   </SafeAreaView>
   )
 }

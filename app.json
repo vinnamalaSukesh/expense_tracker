@@ -6,7 +6,10 @@
     "experiments": {
       "tsconfigPaths": true
     },
-    "plugins": [],
+    "plugins": [
+      "expo-web-browser",
+      "expo-font"
+    ],
     "orientation": "portrait",
     "icon": "./assets/rupee.png",
     "userInterfaceStyle": "automatic",
@@ -19,7 +22,8 @@
       "**/*"
     ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.sukeshv19.expensetracker"
     },
     "android": {
       "adaptiveIcon": {

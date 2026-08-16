@@ -3,13 +3,11 @@ import './global.css';
 import { useState } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import Index from './components/Index';
-import Login from './components/Login';
 import Planner from './components/Planner';
-import { ActivityIndicator, StatusBar, Image, Text, TouchableOpacity, View } from 'react-native';
+import { StatusBar, Image, Text, TouchableOpacity, View } from 'react-native';
 import { Header } from 'react-native-elements';
 import RupeeIcon from './assets/rupee.png'
 import { useColorScheme } from 'nativewind';
-import { AuthProvider, useAuth } from './lib/AuthContext';
 
 function Tabs({ tab, setTab }) {
   return (
@@ -31,20 +29,7 @@ function Tabs({ tab, setTab }) {
 
 function AppShell() {
   const { colorScheme, toggleColorScheme } = useColorScheme();
-  const { user, initializing, signOut } = useAuth();
   const [tab, setTab] = useState('expenses');
-
-  if (initializing) {
-    return (
-      <View className="flex-1 items-center justify-center bg-white dark:bg-slate-900">
-        <ActivityIndicator size="large" color="#4F46E5" />
-      </View>
-    );
-  }
-
-  if (!user) {
-    return <Login />;
-  }
 
   return (
     <>
@@ -61,9 +46,6 @@ function AppShell() {
       />
       <Tabs tab={tab} setTab={setTab} />
       {tab === 'expenses' ? <Index /> : <Planner />}
-      <TouchableOpacity className="py-2 items-center bg-white dark:bg-slate-900" onPress={signOut}>
-        <Text className="text-gray-400 dark:text-gray-500 text-xs">Sign out</Text>
-      </TouchableOpacity>
     </>
   );
 }
@@ -74,9 +56,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <StatusBar barStyle={colorScheme === 'dark' ? 'light-content' : 'dark-content'} />
-      <AuthProvider>
-        <AppShell />
-      </AuthProvider>
+      <AppShell />
     </SafeAreaProvider>
   );
 }
