@@ -1,28 +1,21 @@
 import { Entypo } from '@expo/vector-icons';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import { Alert, FlatList, Modal, ScrollView, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { supabase } from '../lib/supabase';
+import { db } from '../lib/firebase';
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
-const DATA_BUCKET = 'app-data';
-const ACTIVITY_FILE = 'activity.json';
+const ACTIVITY_DOC = doc(db, 'appData', 'activity');
 
 async function fetchActivityFile() {
-  const { data } = supabase.storage.from(DATA_BUCKET).getPublicUrl(ACTIVITY_FILE);
-  const res = await fetch(`${data.publicUrl}?t=${Date.now()}`);
-  if (res.ok) return res.json();
-  const body = await res.json().catch(() => null);
-  if (res.status === 400 && body?.code === 'NoSuchKey') return null;
-  throw new Error(`Failed to fetch activity (status ${res.status}): ${body?.message ?? 'unknown error'}`);
+  const snap = await getDoc(ACTIVITY_DOC);
+  return snap.exists() ? snap.data() : null;
 }
 
 async function saveActivityFile(activity) {
-  const { error } = await supabase.storage
-    .from(DATA_BUCKET)
-    .upload(ACTIVITY_FILE, JSON.stringify(activity), { contentType: 'application/json', upsert: true });
-  if (error) throw error;
+  await setDoc(ACTIVITY_DOC, activity);
 }
 
 function PickerModal({ visible, title, options, selected, onSelect, onClose }) {

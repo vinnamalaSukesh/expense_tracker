@@ -2,16 +2,16 @@ import { Entypo, FontAwesome } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { useEffect, useState } from 'react';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { Alert, FlatList, Modal, Platform, ScrollView, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { supabase } from '../lib/supabase';
+import { db } from '../lib/firebase';
 import PieChart from './pie_chart';
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 // Starter categories; more can be added on the fly from the type picker.
 const SEED_TYPES = ['Food', 'Fruits', 'Snacks', 'Curd', 'Grocery', 'Travel', 'Education', 'Shopping', 'Entertainment', 'Recharge', 'Cycle'];
 
-const DATA_BUCKET = 'app-data';
-const EXPENSES_FILE = 'expenses.json';
+const EXPENSES_DOC = doc(db, 'appData', 'expenses');
 
 // Expenses were plain numbers before the "type" column was added; these
 // helpers keep old entries readable instead of crashing on `.amount`.
@@ -23,22 +23,12 @@ function getType(entry) {
 }
 
 async function fetchExpensesFile() {
-  const { data } = supabase.storage.from(DATA_BUCKET).getPublicUrl(EXPENSES_FILE);
-  const res = await fetch(`${data.publicUrl}?t=${Date.now()}`);
-  if (res.ok) return res.json();
-  // Supabase Storage returns this exact body for a genuinely missing object.
-  // Any other failure (network blip, 5xx, etc.) must throw - treating it as
-  // "no file yet" is what previously caused a silent overwrite of real data.
-  const body = await res.json().catch(() => null);
-  if (res.status === 400 && body?.code === 'NoSuchKey') return null;
-  throw new Error(`Failed to fetch expenses (status ${res.status}): ${body?.message ?? 'unknown error'}`);
+  const snap = await getDoc(EXPENSES_DOC);
+  return snap.exists() ? snap.data() : null;
 }
 
 async function saveExpensesFile(expenses) {
-  const { error } = await supabase.storage
-    .from(DATA_BUCKET)
-    .upload(EXPENSES_FILE, JSON.stringify(expenses), { contentType: 'application/json', upsert: true });
-  if (error) throw error;
+  await setDoc(EXPENSES_DOC, expenses);
 }
 
 function PickerModal({ visible, title, options, selected, onSelect, onClose, allowCustom, onAddCustom }) {
