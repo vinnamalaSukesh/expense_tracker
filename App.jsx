@@ -3,7 +3,7 @@ import './global.css';
 import { useState } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import Index from './components/Index';
-import Planner from './components/Planner';
+import Activity from './components/Activity';
 import { StatusBar, Image, Text, TouchableOpacity, View } from 'react-native';
 import { Header } from 'react-native-elements';
 import RupeeIcon from './assets/rupee.png'
@@ -12,14 +12,14 @@ import { useColorScheme } from 'nativewind';
 function Tabs({ tab, setTab }) {
   return (
     <View className="flex-row bg-white dark:bg-slate-900 border-b border-gray-100 dark:border-slate-800">
-      {['expenses', 'planner'].map((t) => (
+      {['expenses', 'activity'].map((t) => (
         <TouchableOpacity
           key={t}
           className={`flex-1 py-3 items-center border-b-2 ${tab === t ? 'border-indigo-600' : 'border-transparent'}`}
           onPress={() => setTab(t)}
         >
           <Text className={`font-bold ${tab === t ? 'text-indigo-600' : 'text-gray-500 dark:text-gray-400'}`}>
-            {t === 'expenses' ? 'Expenses' : 'Planner'}
+            {t === 'expenses' ? 'Expenses' : 'Activity'}
           </Text>
         </TouchableOpacity>
       ))}
@@ -45,7 +45,7 @@ function AppShell() {
         }}
       />
       <Tabs tab={tab} setTab={setTab} />
-      {tab === 'expenses' ? <Index /> : <Planner />}
+      {tab === 'expenses' ? <Index /> : <Activity />}
     </>
   );
 }

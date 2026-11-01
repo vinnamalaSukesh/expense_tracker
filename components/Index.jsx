@@ -1,25 +1,22 @@
 import { Entypo, FontAwesome } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useEffect, useRef, useState } from 'react';
+import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+import { useEffect, useState } from 'react';
 import { Alert, FlatList, Modal, Platform, ScrollView, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { supabase } from '../lib/supabase';
 import PieChart from './pie_chart';
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-const SOURCES = ['SBI UPI', 'Kotak UPI', 'IDFC UPI', 'Axis Credit', 'IDFC Credit'];
 // Starter categories; more can be added on the fly from the type picker.
-const SEED_TYPES = ['Food', 'Fruits', 'Snacks', 'Curd', 'Grocery', 'Travel', 'Education', 'Shopping', 'Entertainment', 'Recharge'];
+const SEED_TYPES = ['Food', 'Fruits', 'Snacks', 'Curd', 'Grocery', 'Travel', 'Education', 'Shopping', 'Entertainment', 'Recharge', 'Cycle'];
 
 const DATA_BUCKET = 'app-data';
 const EXPENSES_FILE = 'expenses.json';
 
-// Expenses were plain numbers before the "source"/"type" columns were added;
-// these helpers keep old entries readable instead of crashing on `.amount`.
+// Expenses were plain numbers before the "type" column was added; these
+// helpers keep old entries readable instead of crashing on `.amount`.
 function getAmount(entry) {
   return typeof entry === 'number' ? entry : entry.amount;
-}
-function getSource(entry) {
-  return typeof entry === 'number' ? null : entry.source;
 }
 function getType(entry) {
   return typeof entry === 'number' ? null : entry.type ?? null;
@@ -28,8 +25,13 @@ function getType(entry) {
 async function fetchExpensesFile() {
   const { data } = supabase.storage.from(DATA_BUCKET).getPublicUrl(EXPENSES_FILE);
   const res = await fetch(`${data.publicUrl}?t=${Date.now()}`);
-  if (!res.ok) return null; // file doesn't exist yet
-  return res.json();
+  if (res.ok) return res.json();
+  // Supabase Storage returns this exact body for a genuinely missing object.
+  // Any other failure (network blip, 5xx, etc.) must throw - treating it as
+  // "no file yet" is what previously caused a silent overwrite of real data.
+  const body = await res.json().catch(() => null);
+  if (res.status === 400 && body?.code === 'NoSuchKey') return null;
+  throw new Error(`Failed to fetch expenses (status ${res.status}): ${body?.message ?? 'unknown error'}`);
 }
 
 async function saveExpensesFile(expenses) {
@@ -93,14 +95,13 @@ function Index() {
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [expenseName, setExpenseName] = useState('');
   const [amount, setAmount] = useState('');
-  const [source, setSource] = useState(SOURCES[0]);
   const [type, setType] = useState(SEED_TYPES[0]);
   const [extraTypes, setExtraTypes] = useState([]);
   const [showYearPicker, setShowYearPicker] = useState(false);
   const [showMonthPicker, setShowMonthPicker] = useState(false);
-  const [showSourcePicker, setShowSourcePicker] = useState(false);
   const [showTypePicker, setShowTypePicker] = useState(false);
-  const migrationAttempted = useRef(false);
+  const [dataLoaded, setDataLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(null);
 
   const usedTypes = new Set();
   for (const months of Object.values(expensesData)) {
@@ -124,8 +125,9 @@ function Index() {
   const currentYear = new Date().getFullYear();
   const allYears = Array.from(new Set([...dataYears, currentYear])).sort((a, b) => b - a).map(String);
 
-  // Loads expenses.json from Supabase Storage; if it doesn't exist yet, it
-  // migrates any pre-existing local AsyncStorage data up.
+  // Loads expenses.json from Supabase Storage. No local fallback: if this
+  // fails, dataLoaded stays false so nothing can be saved (which would
+  // overwrite the cloud file) until a real load succeeds.
   useEffect(() => {
     let cancelled = false;
 
@@ -133,20 +135,13 @@ function Index() {
       try {
         const remote = await fetchExpensesFile();
         if (cancelled) return;
-
-        if (remote && Object.keys(remote).length > 0) {
-          setExpensesData(remote);
-          return;
-        }
-
-        if (migrationAttempted.current) return;
-        migrationAttempted.current = true;
-        const savedData = await AsyncStorage.getItem('expenses-data');
-        const parsed = savedData ? JSON.parse(savedData) : {};
-        setExpensesData(parsed);
-        await saveExpensesFile(parsed);
+        setExpensesData(remote ?? {});
+        setDataLoaded(true);
       } catch (err) {
-        console.error('Failed to load/migrate expenses', err);
+        if (cancelled) return;
+        console.error('Failed to load expenses', err);
+        setLoadError(err.message ?? 'Failed to load expenses.');
+        Alert.alert('Load Error', `Could not load your expenses from Supabase:\n${err.message}`);
       }
     })();
 
@@ -186,6 +181,10 @@ function Index() {
   }
 
   const handleAddExpense = async () => {
+    if (!dataLoaded) {
+      Alert.alert('Not Ready', 'Still loading your data from Supabase - please wait before adding an expense.');
+      return;
+    }
     if (!expenseName.trim() || !amount.trim()) {
       Alert.alert('Validation Error', 'Please enter both an expense name and an amount.');
       return;
@@ -204,7 +203,7 @@ function Index() {
     if (!updatedData[selectedYear][selectedMonth]) updatedData[selectedYear][selectedMonth] = {};
     if (!updatedData[selectedYear][selectedMonth][selectedDay]) updatedData[selectedYear][selectedMonth][selectedDay] = {};
 
-    updatedData[selectedYear][selectedMonth][selectedDay][expenseName.trim()] = { amount: numericAmount, source, type };
+    updatedData[selectedYear][selectedMonth][selectedDay][expenseName.trim()] = { amount: numericAmount, type };
 
     setExpensesData(updatedData); // Update UI
     setExpenseName('');
@@ -219,17 +218,14 @@ function Index() {
   };
 
   const monthlyExpenseMap = {};
-  const sourceTotals = {};
   const typeTotals = {};
   let monthTotal = 0;
   const monthData = (expensesData)[selectedYear]?.[selectedMonth] ?? {};
   for (const [, expenses] of Object.entries(monthData)) {
     for (const [name, entry] of Object.entries(expenses)) {
       const amt = getAmount(entry);
-      const entrySource = getSource(entry) ?? 'Unknown';
       const entryType = getType(entry) ?? 'Unknown';
       monthlyExpenseMap[name] = (monthlyExpenseMap[name] ?? 0) + amt;
-      sourceTotals[entrySource] = (sourceTotals[entrySource] ?? 0) + amt;
       typeTotals[entryType] = (typeTotals[entryType] ?? 0) + amt;
       monthTotal += amt;
     }
@@ -237,14 +233,35 @@ function Index() {
   const pieData = Object.entries(monthlyExpenseMap)
     .map(([name, amount]) => ({ name, amount }))
     .sort((a, b) => b.amount - a.amount);
-  const sourceData = Object.entries(sourceTotals)
-    .map(([name, amount]) => ({ name, amount }))
-    .sort((a, b) => b.amount - a.amount);
   const typeData = Object.entries(typeTotals)
     .map(([name, amount]) => ({ name, amount }))
     .sort((a, b) => b.amount - a.amount);
 
+  const handleExportMonth = async () => {
+    if (Object.keys(monthData).length === 0) {
+      Alert.alert('Nothing to Export', `No expenses found for ${selectedMonth} ${selectedYear}.`);
+      return;
+    }
+    try {
+      const fileName = `${selectedYear}-${selectedMonth}.json`;
+      const file = new FileSystem.File(FileSystem.Paths.cache, fileName);
+      file.create({ overwrite: true });
+      file.write(JSON.stringify(monthData, null, 2));
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(file.uri, { mimeType: 'application/json', dialogTitle: fileName });
+      } else {
+        Alert.alert('Sharing Unavailable', `Exported to ${file.uri}`);
+      }
+    } catch (error) {
+      Alert.alert('Export Error', error.message ?? 'Failed to export expenses.');
+    }
+  };
+
   const handleDeleteExpense = async (name) => {
+    if (!dataLoaded) {
+      Alert.alert('Not Ready', 'Still loading your data from Supabase - please wait before deleting an expense.');
+      return;
+    }
     const updatedData = JSON.parse(JSON.stringify(expensesData));
     if (updatedData[selectedYear]?.[selectedMonth]?.[selectedDay]) {
       delete updatedData[selectedYear][selectedMonth][selectedDay][name];
@@ -260,13 +277,16 @@ function Index() {
   const [editAmount, setEditAmount] = useState('');
 
   const handleEditSave = async (oldName) => {
+    if (!dataLoaded) {
+      Alert.alert('Not Ready', 'Still loading your data from Supabase - please wait before editing an expense.');
+      return;
+    }
     const numericAmount = parseFloat(editAmount);
     if (isNaN(numericAmount)) return;
     const updatedData = JSON.parse(JSON.stringify(expensesData));
     const existingEntry = updatedData[selectedYear][selectedMonth][selectedDay][oldName];
     updatedData[selectedYear][selectedMonth][selectedDay][oldName] = {
       amount: numericAmount,
-      source: getSource(existingEntry),
       type: getType(existingEntry),
     };
     setExpensesData(updatedData);
@@ -293,13 +313,25 @@ function Index() {
   return (
   <SafeAreaView className="flex-1 bg-white dark:bg-slate-900 pb-5" edges={['bottom']}>
     <ScrollView className="flex-1 p-4">
-      <View className="flex-row items-center gap-5 mb-5">
-        <Text className="text-xl font-bold dark:text-white">Select a Month</Text>
+      {loadError && (
+        <View className="bg-red-100 dark:bg-red-900/40 border border-red-400 dark:border-red-700 rounded-lg p-3 mb-4">
+          <Text className="text-red-700 dark:text-red-300 font-bold">Could not load your data</Text>
+          <Text className="text-red-700 dark:text-red-300 text-sm mt-1">{loadError}</Text>
+        </View>
+      )}
+      {!dataLoaded && !loadError && (
+        <Text className="text-gray-500 dark:text-gray-400 text-sm mb-4">Loading your expenses…</Text>
+      )}
+      <View className="flex-row items-center gap-2 mb-5">
         <TouchableOpacity className="border border-indigo-600 rounded-lg py-1.5 px-3 bg-indigo-50" onPress={() => setShowYearPicker(true)}>
           <Text className="text-indigo-600 font-bold text-[16px]">{selectedYear} ▾</Text>
         </TouchableOpacity>
         <TouchableOpacity className="border border-indigo-600 rounded-lg py-1.5 px-3 bg-indigo-50" onPress={() => setShowMonthPicker(true)}>
-          <Text className="text-indigo-600 font-bold text-[16px]">{selectedMonth} ▾</Text>
+          <Text className="text-indigo-600 font-bold text-[16px]">{selectedMonth.slice(0, 3).toUpperCase()} ▾</Text>
+        </TouchableOpacity>
+        <View className="flex-1" />
+        <TouchableOpacity className="border border-emerald-600 rounded-lg p-2 bg-emerald-50" onPress={handleExportMonth}>
+          <Entypo name="share" size={18} color="#059669" />
         </TouchableOpacity>
       </View>
 
@@ -331,9 +363,6 @@ function Index() {
           value={expenseName}
           onChangeText={setExpenseName}
         />
-        <TouchableOpacity className="border border-indigo-600 rounded-lg px-2 py-3 bg-indigo-50" onPress={() => setShowSourcePicker(true)}>
-          <Text className="text-indigo-600 font-bold text-xs" numberOfLines={1}>{source} ▾</Text>
-        </TouchableOpacity>
         <TouchableOpacity className="border border-emerald-600 rounded-lg px-2 py-3 bg-emerald-50" onPress={() => setShowTypePicker(true)}>
           <Text className="text-emerald-600 font-bold text-xs" numberOfLines={1}>{type} ▾</Text>
         </TouchableOpacity>
@@ -356,14 +385,12 @@ function Index() {
         ) : (
           todayExpenses.map(([name, entry]) => {
             const amt = getAmount(entry);
-            const entrySource = getSource(entry);
             const entryType = getType(entry);
-            const subtitle = [entryType, entrySource].filter(Boolean).join(' · ');
             return (
             <View key={name} className="flex-row justify-between items-center mb-5 border-b border-gray-100 dark:border-slate-700">
               <View className="w-[50%]">
                 <Text className="text-xl font-bold dark:text-white" numberOfLines={1}>{name}</Text>
-                {subtitle && <Text className="text-xs text-gray-500 dark:text-gray-400" numberOfLines={1}>{subtitle}</Text>}
+                {entryType && <Text className="text-xs text-gray-500 dark:text-gray-400" numberOfLines={1}>{entryType}</Text>}
               </View>
               {editingName === name ? (
                 <>
@@ -424,22 +451,6 @@ function Index() {
       <PieChart data={pieData} total={monthTotal} />
 
       <View className="p-5">
-        <Text className="text-2xl font-bold mb-5 dark:text-white">By Source ({selectedMonth})</Text>
-        <View>
-          {sourceData.length === 0 ? (
-            <Text className="text-gray-600 dark:text-gray-400 text-base text-center">No expenses this month.</Text>
-          ) : (
-            sourceData.map((item) => (
-              <View key={item.name} className="flex-row justify-between py-3.5 border-b border-gray-200 dark:border-slate-700">
-                <Text className="text-lg dark:text-gray-200">{item.name}</Text>
-                <Text className="text-lg font-bold dark:text-white">₹{item.amount}</Text>
-              </View>
-            ))
-          )}
-        </View>
-      </View>
-
-      <View className="p-5">
         <Text className="text-2xl font-bold mb-5 dark:text-white">By Type ({selectedMonth})</Text>
         <View>
           {typeData.length === 0 ? (
@@ -457,7 +468,6 @@ function Index() {
     </ScrollView>
     <PickerModal visible={showYearPicker} title="Select Year" options={allYears} selected={selectedYear} onSelect={changeYear} onClose={() => setShowYearPicker(false)} />
     <PickerModal visible={showMonthPicker} title="Select Month" options={MONTHS} selected={selectedMonth} onSelect={changeMonth} onClose={() => setShowMonthPicker(false)} />
-    <PickerModal visible={showSourcePicker} title="Select Source" options={SOURCES} selected={source} onSelect={setSource} onClose={() => setShowSourcePicker(false)} />
     <PickerModal
       visible={showTypePicker}
       title="Select Type"
