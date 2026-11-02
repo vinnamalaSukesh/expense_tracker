@@ -63,7 +63,7 @@ function Activity() {
         if (cancelled) return;
         console.error('Failed to load activity', err);
         setLoadError(err.message ?? 'Failed to load activity.');
-        Alert.alert('Load Error', `Could not load your activity from Supabase:\n${err.message}`);
+        Alert.alert('Load Error', `Could not load your activity:\n${err.message}`);
       }
     })();
 
@@ -97,7 +97,7 @@ function Activity() {
 
   const persistDay = async (patch) => {
     if (!dataLoaded) {
-      Alert.alert('Not Ready', 'Still loading your data from Supabase - please wait.');
+      Alert.alert('Not Ready', 'Still loading your data - please wait.');
       return;
     }
     const updatedData = JSON.parse(JSON.stringify(activityData));

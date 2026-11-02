@@ -115,7 +115,7 @@ function Index() {
   const currentYear = new Date().getFullYear();
   const allYears = Array.from(new Set([...dataYears, currentYear])).sort((a, b) => b - a).map(String);
 
-  // Loads expenses.json from Supabase Storage. No local fallback: if this
+  // Loads expenses.json from Firestore. No local fallback: if this
   // fails, dataLoaded stays false so nothing can be saved (which would
   // overwrite the cloud file) until a real load succeeds.
   useEffect(() => {
@@ -131,7 +131,7 @@ function Index() {
         if (cancelled) return;
         console.error('Failed to load expenses', err);
         setLoadError(err.message ?? 'Failed to load expenses.');
-        Alert.alert('Load Error', `Could not load your expenses from Supabase:\n${err.message}`);
+        Alert.alert('Load Error', `Could not load your expenses:\n${err.message}`);
       }
     })();
 
@@ -172,7 +172,7 @@ function Index() {
 
   const handleAddExpense = async () => {
     if (!dataLoaded) {
-      Alert.alert('Not Ready', 'Still loading your data from Supabase - please wait before adding an expense.');
+      Alert.alert('Not Ready', 'Still loading your data - please wait before adding an expense.');
       return;
     }
     if (!expenseName.trim() || !amount.trim()) {
@@ -249,7 +249,7 @@ function Index() {
 
   const handleDeleteExpense = async (name) => {
     if (!dataLoaded) {
-      Alert.alert('Not Ready', 'Still loading your data from Supabase - please wait before deleting an expense.');
+      Alert.alert('Not Ready', 'Still loading your data - please wait before deleting an expense.');
       return;
     }
     const updatedData = JSON.parse(JSON.stringify(expensesData));
@@ -268,7 +268,7 @@ function Index() {
 
   const handleEditSave = async (oldName) => {
     if (!dataLoaded) {
-      Alert.alert('Not Ready', 'Still loading your data from Supabase - please wait before editing an expense.');
+      Alert.alert('Not Ready', 'Still loading your data - please wait before editing an expense.');
       return;
     }
     const numericAmount = parseFloat(editAmount);
